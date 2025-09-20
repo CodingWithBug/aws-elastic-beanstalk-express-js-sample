@@ -1,0 +1,73 @@
+pipeline {
+  agent any
+  options {
+    timestamps()
+    ansiColor('xterm')
+  }
+
+  environment {
+    REGISTRY_URL = 'https://index.docker.io/v1/'
+    IMAGE_REPO   = 'panyunpeng/isec6000_assignment2' 
+    IMAGE_TAG    = "${env.BUILD_NUMBER}"
+  }
+
+  stages {
+    stage('Checkout') {
+      steps { checkout scm }
+    }
+
+    stage('Install & Test (Node 16)') {
+      steps {
+        script {
+          // Use Node 16 Docker image as the build environment
+          docker.image('node:16').inside('-u root') {
+            sh '''
+              node -v
+              npm -v
+              # The assignment mentions "npm install -- save"; here we run install
+              npm install --save || true
+              npm ci || true
+              npm test --if-present
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Security Scan (Snyk, fail on High/Critical)') {
+      environment { SNYK_TOKEN = credentials('snyk-token') }
+      steps {
+        script {
+          docker.image('node:16').inside('-u root') {
+            sh '''
+              npm install -g snyk
+              snyk auth ${SNYK_TOKEN}
+              # Fail the build if High/Critical vulnerabilities are found
+              snyk test --severity-threshold=high
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Build & Push Docker Image') {
+      steps {
+        script {
+          // Build the app image using the Docker server (DinD) configured for Jenkins
+          def app = docker.build("${IMAGE_REPO}:${IMAGE_TAG}")
+          docker.withRegistry(env.REGISTRY_URL, 'dockerhub-credentials') {
+            app.push("${IMAGE_TAG}")
+            app.push('latest')
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      archiveArtifacts artifacts: 'npm-debug.log,**/junit*.xml', allowEmptyArchive: true
+    }
+  }
+}
+
