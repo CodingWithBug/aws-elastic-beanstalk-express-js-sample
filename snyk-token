@@ -42,8 +42,9 @@ pipeline {
             sh '''
               npm install -g snyk
               snyk auth ${SNYK_TOKEN}
-              # Fail the build if High/Critical vulnerabilities are found
-              snyk test --severity-threshold=high
+              # 输出 json 报告，同时保持 High/Critical 失败的行为
+              set -o pipefail
+              snyk test --severity-threshold=high --json | tee snyk-report.json
             '''
           }
         }
