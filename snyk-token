@@ -43,8 +43,8 @@ pipeline {
               npm install -g snyk
               snyk auth ${SNYK_TOKEN}
               # generate json report，keep High/Critical failure actions
-              set -o pipefail
-              snyk test --severity-threshold=high --json | tee snyk-report.json
+              bash -o pipefail -c 'snyk test --severity-threshold=high --json | tee snyk-report.json'
+
             '''
           }
         }
