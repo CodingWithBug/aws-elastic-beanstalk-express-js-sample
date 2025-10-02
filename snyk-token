@@ -67,7 +67,7 @@ pipeline {
 
   post {
     always {
-      archiveArtifacts artifacts: 'npm-debug.log,**/junit*.xml', allowEmptyArchive: true
+      archiveArtifacts artifacts: 'snyk-report.json', allowEmptyArchive: true
     }
   }
 }
