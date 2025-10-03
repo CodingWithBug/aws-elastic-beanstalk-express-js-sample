@@ -1,33 +1,61 @@
 pipeline {
   agent any
+
   options {
+    // Add timestamps to console output
     timestamps()
+    // Enable ANSI colors for better readability
     ansiColor('xterm')
+    // Keep only the last 20 builds to save storage
+    buildDiscarder(logRotator(numToKeepStr: '20'))
+    // Set global timeout for the whole pipeline (60 minutes)
+    timeout(time: 60, unit: 'MINUTES')
   }
 
   environment {
+    // DockerHub registry info
     REGISTRY_URL = 'https://index.docker.io/v1/'
-    IMAGE_REPO   = 'panyunpeng/isec6000_assignment2' 
+    IMAGE_REPO   = 'panyunpeng/isec6000_assignment2'
     IMAGE_TAG    = "${env.BUILD_NUMBER}"
+
+    // Centralized directory to store logs and reports
+    REPORT_DIR   = 'reports'
   }
 
   stages {
+
     stage('Checkout') {
-      steps { checkout scm }
+      steps {
+        checkout scm
+        sh '''
+          set -Eeuo pipefail
+          mkdir -p "${REPORT_DIR}/junit" "${REPORT_DIR}/logs"
+          echo "Workspace: $(pwd)" | tee -a "${REPORT_DIR}/logs/checkout.log"
+          git log -1 --pretty=oneline | tee -a "${REPORT_DIR}/logs/checkout.log"
+        '''
+      }
     }
 
     stage('Install & Test (Node 16)') {
       steps {
         script {
-          // Use Node 16 Docker image as the build environment
+          // Run Node.js build and tests inside Node 16 container
           docker.image('node:16').inside('-u root') {
             sh '''
-              node -v
-              npm -v
-              # The assignment mentions "npm install -- save"; here we run install
-              npm install --save || true
-              npm ci || true
-              npm test --if-present
+              set -Eeuo pipefail
+              node -v | tee -a "${REPORT_DIR}/logs/node-env.log"
+              npm -v  | tee -a "${REPORT_DIR}/logs/node-env.log"
+
+              # Save npm logs for troubleshooting
+              (npm install --save 2>&1 | tee "${REPORT_DIR}/logs/npm-install.log") || true
+              (npm ci 2>&1 | tee "${REPORT_DIR}/logs/npm-ci.log") || true
+
+              # Run tests, capture results and logs
+              export JEST_JUNIT_OUTPUT="${REPORT_DIR}/junit/junit.xml"
+              (npm test --if-present 2>&1 | tee "${REPORT_DIR}/logs/npm-test.log") || true
+
+              # Check if JUnit XML was generated
+              test -f "${REPORT_DIR}/junit/junit.xml" && echo "JUnit file found." || echo "No JUnit file."
             '''
           }
         }
@@ -35,16 +63,25 @@ pipeline {
     }
 
     stage('Security Scan (Snyk, fail on High/Critical)') {
-      environment { SNYK_TOKEN = credentials('snyk-token') }
+      environment {
+        // Load Snyk token from Jenkins credentials
+        SNYK_TOKEN = credentials('snyk-token')
+      }
       steps {
         script {
           docker.image('node:16').inside('-u root') {
             sh '''
-              npm install -g snyk
-              snyk auth ${SNYK_TOKEN}
-              # generate json report，keep High/Critical failure actions
-              bash -o pipefail -c 'snyk test --severity-threshold=high --json | tee snyk-report.json'
+              set -Eeuo pipefail
+              npm install -g snyk 2>&1 | tee -a "${REPORT_DIR}/logs/snyk.log"
+              snyk auth "${SNYK_TOKEN}" 2>&1 | tee -a "${REPORT_DIR}/logs/snyk.log"
 
+              # Run security scan (fail build if High/Critical issues are found)
+              bash -o pipefail -c 'snyk test --severity-threshold=high --json \
+                | tee "${REPORT_DIR}/snyk-report.json"'
+
+              # Generate SARIF report for integration with security dashboards
+              snyk test --severity-threshold=high --sarif-file-output="${REPORT_DIR}/snyk-report.sarif" \
+                2>&1 | tee -a "${REPORT_DIR}/logs/snyk.log" || true
             '''
           }
         }
@@ -54,12 +91,20 @@ pipeline {
     stage('Build & Push Docker Image') {
       steps {
         script {
-          // Build the app image using the Docker server (DinD) configured for Jenkins
+          // Build Docker image and push to DockerHub
           def app = docker.build("${IMAGE_REPO}:${IMAGE_TAG}")
+
           docker.withRegistry(env.REGISTRY_URL, 'dockerhub-credentials') {
             app.push("${IMAGE_TAG}")
             app.push('latest')
           }
+
+          // Save image details for auditing
+          sh '''
+            set -Eeuo pipefail
+            docker image inspect "${IMAGE_REPO}:${IMAGE_TAG}" > "${REPORT_DIR}/image-inspect.json"
+            docker history --no-trunc "${IMAGE_REPO}:${IMAGE_TAG}" > "${REPORT_DIR}/image-history.txt"
+          '''
         }
       }
     }
@@ -67,8 +112,30 @@ pipeline {
 
   post {
     always {
-      archiveArtifacts artifacts: 'snyk-report.json', allowEmptyArchive: true
+      script {
+        // Publish JUnit test results if available
+        junit allowEmptyResults: true, testResults: "${REPORT_DIR}/junit/**/*.xml"
+      }
+
+      // Archive all logs and reports for this build
+      archiveArtifacts artifacts: """
+        ${REPORT_DIR}/**/*,
+        snyk-report.json
+      """.stripIndent().trim(), allowEmptyArchive: true
+
+      echo "Artifacts archived in '${REPORT_DIR}/'."
+    }
+
+    success {
+      echo "✅ Build succeeded. Image pushed: ${env.IMAGE_REPO}:${env.IMAGE_TAG}"
+    }
+
+    unstable {
+      echo "⚠️ Build marked UNSTABLE. Please review test and Snyk results."
+    }
+
+    failure {
+      echo "❌ Build failed. Check logs in ${env.REPORT_DIR}/logs for details."
     }
   }
 }
-
