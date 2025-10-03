@@ -2,7 +2,6 @@ pipeline {
   agent any
 
   options {
-    // Retain last 20 builds; adjust as needed
     buildDiscarder(logRotator(numToKeepStr: '20'))
     timestamps()
     ansiColor('xterm')
@@ -56,14 +55,14 @@ node -v | tee -a "${REPORT_DIR}/logs/node-env.log"
 npm -v  | tee -a "${REPORT_DIR}/logs/node-env.log"
 
 echo "[npm install]" | tee -a "${REPORT_DIR}/logs/npm-install.log"
-(npm install --save 2>&1 | tee -a "${REPORT_DIR}/logs/npm-install.log") || true
+(npm install 2>&1 | tee -a "${REPORT_DIR}/logs/npm-install.log") || true
 
 echo "[npm ci]" | tee -a "${REPORT_DIR}/logs/npm-ci.log"
 (npm ci 2>&1 | tee -a "${REPORT_DIR}/logs/npm-ci.log") || true
 
 echo "[npm test]" | tee -a "${REPORT_DIR}/logs/npm-test.log"
 export JEST_JUNIT_OUTPUT="${REPORT_DIR}/junit/junit.xml"
-(npm test --if-present 2>&1 | tee -a "${REPORT_DIR}/logs/npm-test.log}") || true
+(npm test --if-present 2>&1 | tee -a "${REPORT_DIR}/logs/npm-test.log") || true
 
 test -f "${REPORT_DIR}/junit/junit.xml" \
   && echo "JUnit report generated at ${REPORT_DIR}/junit/junit.xml" \
@@ -81,7 +80,7 @@ BASH
       steps {
         echo '=== [Security Scan] Begin ==='
         script {
-          docker.image('node:16').inside('-u root') {
+          docker.image('node:16').inside('-u root -e SNYK_TOKEN') {
             sh '''
 bash -Eeuo pipefail <<'BASH'
 echo "[Snyk setup]" | tee -a "${REPORT_DIR}/logs/snyk.log"
@@ -142,13 +141,12 @@ BASH
         snyk-report.json
       """.stripIndent().trim(), allowEmptyArchive: true
 
-      // Try to annotate logs if Log Parser plugin is installed
+      // Try to annotate logs if Log Parser plugin is installed (无 parseRunningBuild 参数)
       script {
         try {
           logParser(
-            projectRulePath: "${REPORT_DIR}/logparser-rules.txt",
-            useProjectRule: true,
-            parseRunningBuild: true,
+            parsingRules: "${REPORT_DIR}/logparser-rules.txt",
+            useProjectRule: false,
             showGraphs: true,
             unstableOnWarning: false,
             failBuildOnError: false
