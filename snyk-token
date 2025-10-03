@@ -2,22 +2,17 @@ pipeline {
   agent any
 
   options {
-    // (a) Retention: keep the last 20 builds to limit disk usage
+    // Retain last 20 builds; adjust as needed
     buildDiscarder(logRotator(numToKeepStr: '20'))
-    // Add timestamps + color for readability
     timestamps()
     ansiColor('xterm')
-    // Guardrail: avoid hanging builds (adjust if needed)
     timeout(time: 60, unit: 'MINUTES')
   }
 
   environment {
-    // DockerHub registry info
     REGISTRY_URL = 'https://index.docker.io/v1/'
     IMAGE_REPO   = 'panyunpeng/isec6000_assignment2'
     IMAGE_TAG    = "${env.BUILD_NUMBER}"
-
-    // Central directory for all logs/reports (a, b)
     REPORT_DIR   = 'reports'
   }
 
@@ -26,21 +21,22 @@ pipeline {
       steps {
         echo '=== [Checkout] Begin ==='
         checkout scm
+        // Use bash explicitly to allow `pipefail`
         sh '''
-          set -Eeuo pipefail
-          mkdir -p "${REPORT_DIR}/junit" "${REPORT_DIR}/logs" "${REPORT_DIR}/security" "${REPORT_DIR}/docker"
-          echo "Workspace: $(pwd)" | tee -a "${REPORT_DIR}/logs/checkout.log"
-          echo "Branch: ${GIT_BRANCH:-unknown}" | tee -a "${REPORT_DIR}/logs/checkout.log"
-          git log -1 --pretty=oneline | tee -a "${REPORT_DIR}/logs/checkout.log"
+bash -Eeuo pipefail <<'BASH'
+mkdir -p "${REPORT_DIR}/junit" "${REPORT_DIR}/logs" "${REPORT_DIR}/security" "${REPORT_DIR}/docker"
+echo "Workspace: $(pwd)" | tee -a "${REPORT_DIR}/logs/checkout.log"
+echo "Branch: ${GIT_BRANCH:-unknown}" | tee -a "${REPORT_DIR}/logs/checkout.log"
+git log -1 --pretty=oneline | tee -a "${REPORT_DIR}/logs/checkout.log"
 
-          # (c) Prepare a simple Log Parser rules file for annotated warnings on the build page
-          cat > "${REPORT_DIR}/logparser-rules.txt" <<'RULES'
+# Simple rules file for optional Log Parser plugin (will be used if installed)
+cat > "${REPORT_DIR}/logparser-rules.txt" <<'RULES'
 error /(^|[^a-zA-Z])(ERR(OR)?|FAIL(ED)?|CRITICAL|FATAL)([^a-zA-Z]|$)/
 warning /(^|[^a-zA-Z])(WARN(ING)?|DEPRECATED)([^a-zA-Z]|$)/
 RULES
-        '''
+BASH
+'''
         script {
-          // Nice visual description in the build history
           def rev = sh(returnStdout: true, script: "git rev-parse --short HEAD").trim()
           currentBuild.description = "img: ${env.IMAGE_TAG} | git: ${rev}"
         }
@@ -52,28 +48,28 @@ RULES
       steps {
         echo '=== [Install & Test] Begin ==='
         script {
-          // Run inside Node 16 container for reproducibility
           docker.image('node:16').inside('-u root') {
             sh '''
-              set -Eeuo pipefail
-              echo "[Node env]" | tee -a "${REPORT_DIR}/logs/node-env.log"
-              node -v | tee -a "${REPORT_DIR}/logs/node-env.log"
-              npm -v  | tee -a "${REPORT_DIR}/logs/node-env.log"
+bash -Eeuo pipefail <<'BASH'
+echo "[Node env]" | tee -a "${REPORT_DIR}/logs/node-env.log"
+node -v | tee -a "${REPORT_DIR}/logs/node-env.log"
+npm -v  | tee -a "${REPORT_DIR}/logs/node-env.log"
 
-              echo "[npm install]" | tee -a "${REPORT_DIR}/logs/npm-install.log"
-              (npm install --save 2>&1 | tee -a "${REPORT_DIR}/logs/npm-install.log") || true
+echo "[npm install]" | tee -a "${REPORT_DIR}/logs/npm-install.log"
+(npm install --save 2>&1 | tee -a "${REPORT_DIR}/logs/npm-install.log") || true
 
-              echo "[npm ci]" | tee -a "${REPORT_DIR}/logs/npm-ci.log"
-              (npm ci 2>&1 | tee -a "${REPORT_DIR}/logs/npm-ci.log") || true
+echo "[npm ci]" | tee -a "${REPORT_DIR}/logs/npm-ci.log"
+(npm ci 2>&1 | tee -a "${REPORT_DIR}/logs/npm-ci.log") || true
 
-              echo "[npm test]" | tee -a "${REPORT_DIR}/logs/npm-test.log"
-              export JEST_JUNIT_OUTPUT="${REPORT_DIR}/junit/junit.xml"
-              (npm test --if-present 2>&1 | tee -a "${REPORT_DIR}/logs/npm-test.log") || true
+echo "[npm test]" | tee -a "${REPORT_DIR}/logs/npm-test.log"
+export JEST_JUNIT_OUTPUT="${REPORT_DIR}/junit/junit.xml"
+(npm test --if-present 2>&1 | tee -a "${REPORT_DIR}/logs/npm-test.log}") || true
 
-              test -f "${REPORT_DIR}/junit/junit.xml" \
-                && echo "JUnit report generated at ${REPORT_DIR}/junit/junit.xml" \
-                || echo "No JUnit file produced by tests."
-            '''
+test -f "${REPORT_DIR}/junit/junit.xml" \
+  && echo "JUnit report generated at ${REPORT_DIR}/junit/junit.xml" \
+  || echo "No JUnit file produced by tests."
+BASH
+'''
           }
         }
         echo '=== [Install & Test] Done ==='
@@ -81,31 +77,29 @@ RULES
     }
 
     stage('Security Scan (Snyk, fail on High/Critical)') {
-      environment {
-        // Jenkins credential id for Snyk
-        SNYK_TOKEN = credentials('snyk-token')
-      }
+      environment { SNYK_TOKEN = credentials('snyk-token') }
       steps {
         echo '=== [Security Scan] Begin ==='
         script {
           docker.image('node:16').inside('-u root') {
             sh '''
-              set -Eeuo pipefail
-              echo "[Snyk setup]" | tee -a "${REPORT_DIR}/logs/snyk.log"
-              npm install -g snyk 2>&1 | tee -a "${REPORT_DIR}/logs/snyk.log"
-              snyk auth "${SNYK_TOKEN}" 2>&1 | tee -a "${REPORT_DIR}/logs/snyk.log"
+bash -Eeuo pipefail <<'BASH'
+echo "[Snyk setup]" | tee -a "${REPORT_DIR}/logs/snyk.log"
+npm install -g snyk 2>&1 | tee -a "${REPORT_DIR}/logs/snyk.log"
+snyk auth "${SNYK_TOKEN}" 2>&1 | tee -a "${REPORT_DIR}/logs/snyk.log"
 
-              echo "[Snyk test JSON]" | tee -a "${REPORT_DIR}/logs/snyk.log"
-              # (b) JSON report for machine processing; will fail build on High/Critical
-              bash -o pipefail -c 'snyk test --severity-threshold=high --json \
-                | tee "${REPORT_DIR}/security/snyk-report.json"'
+echo "[Snyk test JSON]" | tee -a "${REPORT_DIR}/logs/snyk.log"
+# Fail build on High/Critical issues; also store machine-readable JSON
+bash -o pipefail -c 'snyk test --severity-threshold=high --json \
+  | tee "${REPORT_DIR}/security/snyk-report.json"'
 
-              echo "[Snyk test SARIF]" | tee -a "${REPORT_DIR}/logs/snyk.log"
-              # (b) SARIF for code scanning dashboards (does not affect build result)
-              snyk test --severity-threshold=high \
-                --sarif-file-output="${REPORT_DIR}/security/snyk-report.sarif" \
-                2>&1 | tee -a "${REPORT_DIR}/logs/snyk.log" || true
-            '''
+echo "[Snyk test SARIF]" | tee -a "${REPORT_DIR}/logs/snyk.log"
+# SARIF for dashboards; non-fatal
+snyk test --severity-threshold=high \
+  --sarif-file-output="${REPORT_DIR}/security/snyk-report.sarif" \
+  2>&1 | tee -a "${REPORT_DIR}/logs/snyk.log" || true
+BASH
+'''
           }
         }
         echo '=== [Security Scan] Done ==='
@@ -116,23 +110,19 @@ RULES
       steps {
         echo '=== [Docker Build & Push] Begin ==='
         script {
-          // Build with Jenkins' Docker (DinD). Console shows full build log (b).
           def app = docker.build("${IMAGE_REPO}:${IMAGE_TAG}")
-
-          // Push to DockerHub (b)
           docker.withRegistry(env.REGISTRY_URL, 'dockerhub-credentials') {
             app.push("${IMAGE_TAG}")
             app.push('latest')
           }
-
-          // Save image metadata for audit (a, b)
           sh '''
-            set -Eeuo pipefail
-            docker image inspect "${IMAGE_REPO}:${IMAGE_TAG}" \
-              > "${REPORT_DIR}/docker/image-inspect.json"
-            docker history --no-trunc "${IMAGE_REPO}:${IMAGE_TAG}" \
-              > "${REPORT_DIR}/docker/image-history.txt"
-          '''
+bash -Eeuo pipefail <<'BASH'
+docker image inspect "${IMAGE_REPO}:${IMAGE_TAG}" \
+  > "${REPORT_DIR}/docker/image-inspect.json"
+docker history --no-trunc "${IMAGE_REPO}:${IMAGE_TAG}" \
+  > "${REPORT_DIR}/docker/image-history.txt"
+BASH
+'''
         }
         echo '=== [Docker Build & Push] Done ==='
       }
@@ -142,26 +132,31 @@ RULES
   post {
     always {
       script {
-        // (b) Publish test results if present
+        // Publish JUnit if present (won't fail if missing)
         junit allowEmptyResults: true, testResults: "${REPORT_DIR}/junit/**/*.xml"
       }
 
-      // (a) Archive all logs and reports (plus legacy path if present)
+      // Archive everything under reports plus any legacy snyk-report.json
       archiveArtifacts artifacts: """
         ${REPORT_DIR}/**/*,
         snyk-report.json
       """.stripIndent().trim(), allowEmptyArchive: true
 
-      // (c) Annotate build with warnings/errors using Log Parser Plugin
-      //     This creates a "Parsed Console Output" link and inline annotations.
-      logParser(
-        projectRulePath: "${REPORT_DIR}/logparser-rules.txt",
-        useProjectRule: true,
-        parseRunningBuild: true,
-        showGraphs: true,
-        unstableOnWarning: false,
-        failBuildOnError: false
-      )
+      // Try to annotate logs if Log Parser plugin is installed
+      script {
+        try {
+          logParser(
+            projectRulePath: "${REPORT_DIR}/logparser-rules.txt",
+            useProjectRule: true,
+            parseRunningBuild: true,
+            showGraphs: true,
+            unstableOnWarning: false,
+            failBuildOnError: false
+          )
+        } catch (ignored) {
+          echo "Log Parser plugin not installed; skipping annotated console parsing."
+        }
+      }
 
       echo "Artifacts archived under '${REPORT_DIR}/'."
     }
